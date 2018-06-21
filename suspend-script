@@ -1,0 +1,4 @@
+#!/bin/bash
+lock-script
+sleep 0.1
+systemctl suspend
