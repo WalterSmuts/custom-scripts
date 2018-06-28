@@ -1,0 +1,7 @@
+#!/bin/bash
+ignoregrp="base base-devel"
+
+comm -23 <(pacman -Qqen | 
+sort) <(echo $ignorepkg | 
+tr ' ' '\n' | cat <(pacman -Sqg $ignoregrp) - | 
+sort -u) 
