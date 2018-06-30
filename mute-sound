@@ -1,3 +1,6 @@
 #!/bin/bash
-pactl set-sink-mute 0 toggle
-pactl set-sink-mute 1 toggle
+sinks=$(pactl list sinks | grep Name | sed 's/[^ ]* *//')
+echo ${sinks} | tr " " "\n" | while read line;
+do
+	pactl set-sink-mute "$line" toggle;
+done

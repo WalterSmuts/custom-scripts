@@ -1,3 +1,6 @@
 #!/bin/bash
-pactl set-sink-volume 0 +5%
-pactl set-sink-volume 1 +5%
+sinks=$(pactl list sinks | grep Name | sed 's/[^ ]* *//')
+echo ${sinks} | tr " " "\n" | while read line;
+do
+	pactl set-sink-volume "$line" +5%;
+done
