@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# Get list of available sinks
+sinks=$(pactl list sinks | grep Name | cut -d' ' -f2-)
+IFS=$'\n' read -d '' -r -a sinks<<< "$sinks"
+
+# Find current sink
+current_sink=$(pacmd stat | grep "Default sink name" | cut -d " " -f 4)
+
+# Find index of current sink
+for i in "${!sinks[@]}"; do
+	if [[ "${sinks[$i]}" = "${current_sink}" ]]; then
+		break
+	fi
+done
+
+# Set next sink
+sink=${sinks[($i+1)%${#sinks[@]}]}
+
+# Set Default for next applications
+pactl set-default-sink $sink
+
+# Switch current applications
+sources=$(pactl list sink-inputs short | cut -d "	" -f 1)
+echo ${sources} | tr " " "\n" | while read line;
+do
+	pactl move-sink-input $line $sink
+done
