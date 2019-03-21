@@ -1,6 +1,15 @@
 #!/bin/bash
-sinks=$(pactl list sinks | grep Name | sed 's/[^ ]* *//')
-echo ${sinks} | tr " " "\n" | while read line;
+
+# Check if any sinks aren't muted
+if pactl list sinks | grep Mute | grep no
+then
+	state=true
+else
+	state=false
+fi
+
+# Set all sinks to state
+for sink in $(pactl list sinks | grep Name | sed 's/[^ ]* *//')
 do
-	pactl set-sink-mute "$line" toggle;
+	pactl set-sink-mute "$sink" "$state";
 done
