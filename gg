@@ -1,0 +1,51 @@
+#!/bin/bash
+# Wrapper around git grep for easier git navigation. Allows you to select a matching file
+# and it will open up vim to the matching line. Also, all matches are case-insensitive and use perl regex.
+# Usage: gg <regex>
+
+matches=`git grep -Pn "$@"`;
+files=`echo "${matches}" | perl -nle'print $& if m{^[^:]*\:\d+\:}'`;
+number_of_matches=`echo "${files}" | wc -l`;
+file_to_vim="";
+
+if [ -z "$matches" ]; then
+  number_of_matches=0;
+fi
+
+if [ $number_of_matches -eq 0 ]; then
+  echo "No matching files";
+  exit;
+elif [ $number_of_matches -eq 1 ]; then
+  file_to_vim=$files;
+elif [ $number_of_matches -gt 99 ]; then
+  git grep -Pn "$@";
+  exit;
+else
+  i=0;
+  while read -r match; do
+    ((i++));
+    echo "$i - $match"
+  done <<< "$matches";
+
+  echo -n "Choice: ";
+  read ii;
+  i=0;
+  while read -r file; do
+    ((i++));
+    if [ "${i}" == "${ii}" ]; then
+      file_to_vim=$file;
+      break;
+    fi
+  done <<< "$files";
+
+  if [ -z "$file_to_vim" ]; then
+    echo "Invalid choice";
+    exit;
+  fi
+fi
+
+# The files so far have also included the line numbers
+# Here we separate them out and use both bits in the vim command
+file=`echo "${file_to_vim}" | perl -nle'print $& if m{^[^:]*(?=:)}'`;
+line=`echo "${file_to_vim}" | perl -nle'print $& if m{(?<=:)\d+(?=:)}'`;
+vim $file +$line;
