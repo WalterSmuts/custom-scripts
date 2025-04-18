@@ -48,4 +48,4 @@ fi
 # Here we separate them out and use both bits in the vim command
 file=`echo "${file_to_vim}" | perl -nle'print $& if m{^[^:]*(?=:)}'`;
 line=`echo "${file_to_vim}" | perl -nle'print $& if m{(?<=:)\d+(?=:)}'`;
-vim $file +$line;
+nvim $file +$line;
