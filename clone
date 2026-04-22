@@ -1,2 +1,0 @@
-workingDirectory=$(pwd)
-i3-sensible-terminal -cd "$workingDirectory" &

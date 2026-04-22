@@ -1,7 +1,0 @@
-#!/bin/bash
-
-if pactl info | grep "bluez" > /dev/null ; then
-	echo 
-else
-	echo 
-fi
