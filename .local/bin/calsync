@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Sync Exchange calendar to local .ics files for khal via EWS."""
+import subprocess, xml.etree.ElementTree as ET, os, hashlib
+from datetime import datetime, timedelta
+
+CAL_DIR = os.path.expanduser("~/.local/share/calendars/amazon")
+EWS_URL = "https://ballard.amazon.com/EWS/Exchange.asmx"
+# AFTER M365 MIGRATION: change EWS_URL to https://outlook.office365.com/EWS/Exchange.asmx
+NS = {"t": "http://schemas.microsoft.com/exchange/services/2006/types",
+      "m": "http://schemas.microsoft.com/exchange/services/2006/messages"}
+
+def get_pass():
+    return subprocess.run(["pass", "amazon/mail"], capture_output=True, text=True).stdout.strip()
+
+def ews_request(soap):
+    r = subprocess.run(
+        ["curl", "-sS", "--ntlm", "-u", f"ANT\\wssmts:{get_pass()}",
+         "-H", "Content-Type: text/xml", "-d", soap, EWS_URL],
+        capture_output=True, text=True)
+    return r.stdout
+
+def fetch_calendar(days_back=7, days_forward=30):
+    start = (datetime.now(tz=__import__("datetime").timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00Z")
+    end = (datetime.now(tz=__import__("datetime").timezone.utc) + timedelta(days=days_forward)).strftime("%Y-%m-%dT23:59:59Z")
+    soap = f'''<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+  xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types"
+  xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages">
+  <soap:Header><t:RequestServerVersion Version="Exchange2013_SP1"/></soap:Header>
+  <soap:Body>
+    <m:FindItem Traversal="Shallow">
+      <m:ItemShape><t:BaseShape>AllProperties</t:BaseShape></m:ItemShape>
+      <m:CalendarView StartDate="{start}" EndDate="{end}" MaxEntriesReturned="500"/>
+      <m:ParentFolderIds><t:DistinguishedFolderId Id="calendar"/></m:ParentFolderIds>
+    </m:FindItem>
+  </soap:Body>
+</soap:Envelope>'''
+    return ews_request(soap)
+
+def to_ics(item):
+    def txt(tag):
+        el = item.find(f"t:{tag}", NS)
+        return el.text if el is not None else ""
+
+    uid = txt("UID") or hashlib.md5(txt("ItemId") .encode() or txt("Subject").encode()).hexdigest()
+    start = txt("Start")
+    end = txt("End")
+    subject = txt("Subject")
+    location = txt("Location")
+    body = txt("Body") or ""
+
+    # Convert to iCal datetime format
+    def ical_dt(s):
+        if not s: return ""
+        return s.replace("-", "").replace(":", "").replace(".", "")[:15] + "Z"
+
+    return f"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//mail-rules//ews-sync//EN
+BEGIN:VEVENT
+UID:{uid}
+DTSTART:{ical_dt(start)}
+DTEND:{ical_dt(end)}
+SUMMARY:{subject}
+LOCATION:{location}
+END:VEVENT
+END:VCALENDAR"""
+
+def main():
+    os.makedirs(CAL_DIR, exist_ok=True)
+    # Clear old files
+    for f in os.listdir(CAL_DIR):
+        if f.endswith(".ics"):
+            os.remove(os.path.join(CAL_DIR, f))
+
+    xml = fetch_calendar()
+    root = ET.fromstring(xml)
+    items = root.findall(".//t:CalendarItem", NS)
+    for item in items:
+        ics = to_ics(item)
+        uid = ics.split("UID:")[1].split("\n")[0].strip()
+        fname = hashlib.md5(uid.encode()).hexdigest() + ".ics"
+        with open(os.path.join(CAL_DIR, fname), "w") as f:
+            f.write(ics)
+    print(f"Synced {len(items)} calendar items to {CAL_DIR}")
+
+if __name__ == "__main__":
+    main()
