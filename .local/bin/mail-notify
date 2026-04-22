@@ -1,0 +1,43 @@
+#!/bin/bash
+# mail-notify: waybar JSON output + desktop notifications for new mail
+MAIL_DIR="${MAIL_DIR:-$HOME/.local/share/mail/gmail}"
+STATE_FILE="/tmp/mail-notify-seen"
+
+touch "$STATE_FILE"
+
+# Count new (unread) messages per folder
+total=0
+tooltip=""
+for dir in "$MAIL_DIR"/*/new; do
+  [ -d "$dir" ] || continue
+  folder=$(basename "$(dirname "$dir")")
+  count=$(find "$dir" -type f 2>/dev/null | wc -l)
+  [ "$count" -eq 0 ] && continue
+  total=$((total + count))
+  tooltip="${tooltip}${folder}: ${count}\n"
+done
+
+# Desktop notifications: one per folder for new unseen messages
+for dir in "$MAIL_DIR"/*/new; do
+  [ -d "$dir" ] || continue
+  folder=$(basename "$(dirname "$dir")")
+  new_count=0
+  for f in "$dir"/*; do
+    [ -f "$f" ] || continue
+    grep -qxF "$f" "$STATE_FILE" && continue
+    echo "$f" >> "$STATE_FILE"
+    new_count=$((new_count + 1))
+  done
+  [ "$new_count" -gt 0 ] && notify-send -a "neomutt" "📬 $folder" "$new_count new message(s)" 2>/dev/null
+done
+
+# Trim state file to last 5000 entries
+tail -5000 "$STATE_FILE" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+
+# Waybar JSON output
+if [ "$total" -gt 0 ]; then
+  tooltip=$(echo -e "$tooltip" | sed 's/"/\\"/g' | tr '\n' ' ')
+  echo "{\"text\": \"📬 $total\", \"tooltip\": \"$tooltip\", \"class\": \"has-mail\"}"
+else
+  echo "{\"text\": \"\", \"tooltip\": \"No new mail\", \"class\": \"no-mail\"}"
+fi

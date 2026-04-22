@@ -1,0 +1,14 @@
+#!/bin/sh
+# mailsync - sync mail via mbsync (read-only pull)
+
+pgrep -x mbsync >/dev/null && echo "mbsync already running." && exit 0
+
+mbsync -a 2>&1
+exit_code=$?
+
+if [ $exit_code -eq 0 ]; then
+    mail-notify > /dev/null
+    echo "Sync complete."
+else
+    echo "mbsync failed (exit $exit_code)"
+fi
