@@ -11,6 +11,7 @@ tooltip=""
 for dir in "$MAIL_DIR"/*/new; do
   [ -d "$dir" ] || continue
   folder=$(basename "$(dirname "$dir")")
+  [ "$folder" = "Archive" ] && continue
   count=$(find "$dir" -type f 2>/dev/null | wc -l)
   [ "$count" -eq 0 ] && continue
   total=$((total + count))
@@ -21,6 +22,7 @@ done
 for dir in "$MAIL_DIR"/*/new; do
   [ -d "$dir" ] || continue
   folder=$(basename "$(dirname "$dir")")
+  [ "$folder" = "Archive" ] && continue
   new_count=0
   for f in "$dir"/*; do
     [ -f "$f" ] || continue
