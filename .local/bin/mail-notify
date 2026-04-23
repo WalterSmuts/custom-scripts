@@ -50,5 +50,5 @@ if [ "$total" -gt 0 ]; then
   [ -n "$sync_ago" ] && tooltip="$tooltip| $sync_ago"
   echo "{\"text\": \"📬 $total\", \"tooltip\": \"$tooltip\", \"class\": \"has-mail\"}"
 else
-  echo "{\"text\": \"\", \"tooltip\": \"${sync_ago:-No new mail}\", \"class\": \"no-mail\"}"
+  echo "{\"text\": \"📬 0\", \"tooltip\": \"${sync_ago:-No new mail}\", \"class\": \"no-mail\"}"
 fi
