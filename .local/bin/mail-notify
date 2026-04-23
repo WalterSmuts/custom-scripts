@@ -34,10 +34,21 @@ done
 # Trim state file to last 5000 entries
 tail -5000 "$STATE_FILE" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
 
+# Last sync time
+sync_ago=""
+if [ -f /tmp/mailsync-last ]; then
+  elapsed=$(( $(date +%s) - $(cat /tmp/mailsync-last) ))
+  if [ "$elapsed" -lt 60 ]; then sync_ago="synced ${elapsed}s ago"
+  elif [ "$elapsed" -lt 3600 ]; then sync_ago="synced $((elapsed/60))m ago"
+  else sync_ago="synced $((elapsed/3600))h ago"
+  fi
+fi
+
 # Waybar JSON output
 if [ "$total" -gt 0 ]; then
   tooltip=$(echo -e "$tooltip" | sed 's/"/\\"/g' | tr '\n' ' ')
+  [ -n "$sync_ago" ] && tooltip="$tooltip| $sync_ago"
   echo "{\"text\": \"📬 $total\", \"tooltip\": \"$tooltip\", \"class\": \"has-mail\"}"
 else
-  echo "{\"text\": \"\", \"tooltip\": \"No new mail\", \"class\": \"no-mail\"}"
+  echo "{\"text\": \"\", \"tooltip\": \"${sync_ago:-No new mail}\", \"class\": \"no-mail\"}"
 fi
