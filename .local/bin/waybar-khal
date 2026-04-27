@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Waybar clock with seconds + cached khal calendar tooltip."""
+import json, os, pty, re, select, subprocess, time
+from datetime import datetime
+
+CACHE = "/tmp/waybar-khal-tooltip"
+ANSI_COLORS = {
+    "30": "#000000", "31": "#ff5555", "32": "#00ff00", "33": "#ffff00",
+    "34": "#5599ff", "35": "#ff00ff", "36": "#66d9ef", "37": "#ffffff",
+    "90": "#555555", "91": "#ff5555", "92": "#55ff55", "93": "#ffff55",
+    "94": "#79b8ff", "95": "#ff55ff", "96": "#88e0ef", "97": "#ffffff",
+}
+
+def run_khal_with_pty():
+    master, slave = pty.openpty()
+    try:
+        import struct, fcntl, termios
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 200, 0, 0))
+        p = subprocess.Popen(["khal", "calendar"], stdout=slave, stderr=subprocess.DEVNULL, close_fds=True)
+        os.close(slave)
+        output = b""
+        while True:
+            r, _, _ = select.select([master], [], [], 3)
+            if not r:
+                break
+            try:
+                data = os.read(master, 4096)
+                if not data:
+                    break
+                output += data
+            except OSError:
+                break
+        p.wait()
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+    return output.decode("utf-8", errors="replace").replace("\r\n", "\n").strip()
+
+def ansi_to_pango(text):
+    parts = re.split(r"(\x1b\[[0-9;]*m)", text)
+    result, open_spans = [], 0
+    for part in parts:
+        m = re.match(r"\x1b\[([0-9;]*)m", part)
+        if m:
+            codes = m.group(1).split(";") if m.group(1) else ["0"]
+            if codes == ["0"] or codes == [""]:
+                result.append("</span>" * open_spans)
+                open_spans = 0
+                continue
+            attrs, bold, color, reverse = [], False, None, False
+            for code in codes:
+                if code == "1": bold = True
+                elif code == "7": reverse = True
+                elif code in ANSI_COLORS: color = ANSI_COLORS[code]
+            if reverse:
+                attrs += ["background='#ffffff'", "foreground='#1e1e2e'"]
+            elif color:
+                attrs.append(f"foreground='{color}'")
+            if bold:
+                attrs.append("weight='bold'")
+            if attrs:
+                result.append(f"<span {' '.join(attrs)}>")
+                open_spans += 1
+        else:
+            result.append(part.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    result.append("</span>" * open_spans)
+    return "".join(result)
+
+def get_tooltip():
+    try:
+        if os.path.exists(CACHE) and time.time() - os.path.getmtime(CACHE) < 60:
+            with open(CACHE) as f:
+                return f.read()
+    except Exception:
+        pass
+    try:
+        tooltip = f"<tt>{ansi_to_pango(run_khal_with_pty())}</tt>"
+    except Exception:
+        tooltip = "khal unavailable"
+    try:
+        with open(CACHE, "w") as f:
+            f.write(tooltip)
+    except Exception:
+        pass
+    return tooltip
+
+tooltip = get_tooltip()
+print(json.dumps({
+    "text": datetime.now().strftime(" %Y-%m-%d %H:%M:%S"),
+    "tooltip": tooltip,
+}))
