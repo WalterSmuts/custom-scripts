@@ -78,8 +78,11 @@ def main():
     items = root.findall(".//t:CalendarItem", NS)
     for item in items:
         ics = to_ics(item)
+        if "Canceled:" in ics.split("SUMMARY:")[1].split("\n")[0]:
+            continue
         uid = ics.split("UID:")[1].split("\n")[0].strip()
-        fname = hashlib.md5(uid.encode()).hexdigest() + ".ics"
+        dtstart = ics.split("DTSTART:")[1].split("\n")[0].strip()
+        fname = hashlib.md5(f"{uid}_{dtstart}".encode()).hexdigest() + ".ics"
         with open(os.path.join(CAL_DIR, fname), "w") as f:
             f.write(ics)
     print(f"Synced {len(items)} calendar items to {CAL_DIR}")
