@@ -1,0 +1,16 @@
+#!/bin/bash
+HISTORY_FILE="$HOME/.clipboard_history"
+
+# Create history file if it doesn't exist
+touch "$HISTORY_FILE"
+
+# Monitor clipboard and save to history
+wl-paste --watch bash -c 'clip=$(wl-paste); if [[ -n "$clip" && "$clip" != "$(tail -n1 ~/.clipboard_history 2>/dev/null)" ]]; then echo "$clip" >> ~/.clipboard_history; fi' &
+
+# Show history with rofi and copy selection
+if [[ "$1" == "show" ]]; then
+    selection=$(tac "$HISTORY_FILE" | rofi -dmenu -p "Clipboard History")
+    if [[ -n "$selection" ]]; then
+        echo -n "$selection" | wl-copy
+    fi
+fi
