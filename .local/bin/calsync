@@ -68,14 +68,18 @@ END:VCALENDAR"""
 
 def main():
     os.makedirs(CAL_DIR, exist_ok=True)
-    # Clear old files
-    for f in os.listdir(CAL_DIR):
-        if f.endswith(".ics"):
-            os.remove(os.path.join(CAL_DIR, f))
 
     xml = fetch_calendar()
     root = ET.fromstring(xml)
     items = root.findall(".//t:CalendarItem", NS)
+    if not items:
+        print("No items fetched, keeping existing calendar files")
+        return
+
+    # Clear old files only after successful fetch
+    for f in os.listdir(CAL_DIR):
+        if f.endswith(".ics"):
+            os.remove(os.path.join(CAL_DIR, f))
     for item in items:
         ics = to_ics(item)
         if "Canceled:" in ics.split("SUMMARY:")[1].split("\n")[0]:
