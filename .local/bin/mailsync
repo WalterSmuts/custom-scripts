@@ -1,15 +1,30 @@
 #!/bin/sh
-# mailsync - sync mail via mbsync (read-only pull)
+# mailsync - sync mail via mbsync
 
 pgrep -x mbsync >/dev/null && echo "mbsync already running." && exit 0
 
-mbsync -a 2>&1
+# Refresh token if auth is stale
+if ! echo "a LOGIN wssmts@amazon.com oauth" | nc -q1 localhost 1143 2>/dev/null | grep -q "OK Authenticated"; then
+    ~/bin/davmail-refresh > /tmp/davmail-refresh.log 2>&1
+fi
+
+# Sync boxes explicitly instead of `mbsync -a`.
+# Post-M365 migration the server's Sent folder is named "Sent" (special-use \Sent),
+# so pattern-based enumeration can't match the legacy near-side "Sent Items" box and
+# aborts with "far side box Sent Items cannot be opened". An explicit SELECT of
+# "Sent Items" is aliased to the real Sent folder by DavMail, so listing boxes works.
+mbsync "amazon:INBOX,Archive,Code Reviews,Issues,Meetings,News,On-call tickets,Quip,Sent Items" 2>&1
 exit_code=$?
 
 if [ $exit_code -eq 0 ]; then
     date +%s > /tmp/mailsync-last
     mail-notify > /dev/null
     echo "Sync complete."
+elif echo "a LOGIN wssmts@amazon.com oauth" | nc -q1 localhost 1143 2>/dev/null | grep -q "OK Authenticated"; then
+    # Auth works, partial sync (UIDVALIDITY errors etc.) — still mark as synced
+    date +%s > /tmp/mailsync-last
+    mail-notify > /dev/null
+    echo "Sync partial (exit $exit_code)"
 else
     echo "mbsync failed (exit $exit_code)"
 fi
