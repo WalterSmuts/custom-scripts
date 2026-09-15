@@ -7,6 +7,12 @@ Subcommands:
   renew [--auto]  Renew Midway. --auto (used by the systemd timer) only acts when
                   the credential is close to expiry and respects snoozes.
   reset           Clear the failure counter after a lockout-protection stop.
+  aea             Refresh only the 2h AEA cookie (no key). Failsafe for mailsync.
+  log [-n N]      Show recent events from the shared auth log
+                  (~/.local/state/mwinit-refresh/auth.log; mailsync and
+                  davmail-refresh log there too, so gaps between
+                  "davmail refresh-ok" and "mailsync auth-stale" measure the
+                  real O365 refresh-token lifetime).
 
 Credential lifetimes (mwinit 2.5.8, verified 2026-09): web session cookie ~20h,
 SSH certificate 12h, AEA cookie 2h. The AEA cookie is refreshed without the key
@@ -53,10 +59,17 @@ FAILURES_FILE = STATE_DIR / "failures"
 SNOOZE_FILE = STATE_DIR / "snooze_until"
 LOCK_NOTIFIED_FILE = STATE_DIR / "lock_notified"
 COOKIE_BACKUP = STATE_DIR / "cookie.bak"
+LOG_FILE = STATE_DIR / "auth.log"  # shared with mailsync/davmail-refresh to measure real lifetimes
 SESSION_STATUS_URL = "https://midway-auth.amazon.com/api/session-status"
 
 
 # --- state -----------------------------------------------------------------
+
+def log(event: str, detail: str = "") -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with LOG_FILE.open("a") as f:
+        f.write(f"{datetime.now().isoformat(timespec='seconds')} mwinit-refresh {event} {detail}".rstrip() + "\n")
+
 
 def read_int(path: Path) -> int:
     try:
@@ -150,10 +163,17 @@ def fmt_ts(ts: float) -> str:
 
 def refresh_aea_cookie() -> None:
     """Local-only refresh of the 2h AEA cookie; mwinit skips it if the session is dead."""
+    before = cookie_expiry("amazon_enterprise_access")
     try:
-        subprocess.run(["mwinit", "--refresh-aea"], capture_output=True, timeout=15)
+        res = subprocess.run(["mwinit", "--refresh-aea"], capture_output=True, text=True, timeout=15)
     except subprocess.SubprocessError as e:
-        print(f"AEA refresh failed: {e}", file=sys.stderr)
+        log("aea-refresh-error", str(e))
+        return
+    after = cookie_expiry("amazon_enterprise_access")
+    if after > before:
+        log("aea-refresh-ok", f"until={fmt_ts(after)}")
+    else:
+        log("aea-refresh-noop", (res.stdout + res.stderr).strip().replace("\n", " ")[:200])
 
 
 # --- dialogs ---------------------------------------------------------------
@@ -250,6 +270,7 @@ def renew(auto: bool) -> int:
                      "--ok-label=Reset and retry", "--cancel-label=Close")
         if res.returncode != 0:
             return 1
+        log("paused-reset-by-user")
         clear_failures()
         failures = 0
 
@@ -268,6 +289,7 @@ def renew(auto: bool) -> int:
                  "--ok-label=Renew", f"--cancel-label=Later ({SNOOZE // 60} min)")
     if res.returncode != 0:
         write_int(SNOOZE_FILE, int(time.time() + SNOOZE))
+        log("snoozed", f"left={fmt_duration(time_left)}")
         return 0
 
     pin = ask_pin()
@@ -276,6 +298,7 @@ def renew(auto: bool) -> int:
 
     # Count the attempt before spawning so crashes/kills can't bypass the cap.
     write_int(FAILURES_FILE, failures + 1)
+    log("mwinit-attempt", f"n={failures + 1} left={fmt_duration(time_left)} auto={auto}")
     if COOKIE_FILE.exists():
         shutil.copy2(COOKIE_FILE, COOKIE_BACKUP)
     ok, message = run_mwinit(pin)
@@ -288,12 +311,17 @@ def renew(auto: bool) -> int:
         if COOKIE_BACKUP.exists():
             shutil.copy2(COOKIE_BACKUP, COOKIE_FILE)  # failed run leaves a dead session behind
         remaining = MAX_FAILURES - (failures + 1)
+        log("mwinit-failed", message.replace("\n", " ")[:300])
+        if remaining <= 0:
+            log("paused", f"after {MAX_FAILURES} failures")
         show_error(f"{message}\n\nAttempts left before automatic renewal pauses: {remaining}")
         return 1
 
     clear_failures()
     unlink_quiet(SNOOZE_FILE)
     unlink_quiet(COOKIE_BACKUP)
+    log("mwinit-ok", f"cert={fmt_ts(cert_expiry())} session={fmt_ts(web_session_expiry() or 0)} "
+                     f"aea={fmt_ts(cookie_expiry('amazon_enterprise_access'))}")
     notify("Midway renewed", f"Valid until {fmt_ts(new_expiry)}")
     return 0
 
@@ -338,11 +366,24 @@ def main() -> int:
     p_renew = sub.add_parser("renew")
     p_renew.add_argument("--auto", action="store_true")
     sub.add_parser("reset")
+    sub.add_parser("aea", help="refresh the AEA cookie only (no hardware key); used as a failsafe by mailsync")
+    p_log = sub.add_parser("log", help="show recent auth events")
+    p_log.add_argument("-n", type=int, default=40)
     args = parser.parse_args()
 
     if args.cmd == "status":
         return status()
+    if args.cmd == "aea":
+        refresh_aea_cookie()
+        return 0
+    if args.cmd == "log":
+        try:
+            print("".join(LOG_FILE.read_text().splitlines(keepends=True)[-args.n:]), end="")
+        except FileNotFoundError:
+            print("no events logged yet")
+        return 0
     if args.cmd == "reset":
+        log("reset")
         clear_failures()
         unlink_quiet(SNOOZE_FILE)
         print("failure counter and snooze cleared")

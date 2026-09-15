@@ -1,11 +1,38 @@
 #!/bin/sh
 # mailsync - sync mail via mbsync
+#
+# Auth chain: DavMail IMAP login -> (stale) davmail-refresh -> davmail-get-token,
+# which walks Microsoft -> Federate -> Midway SSO using ~/.midway/cookie. That SSO
+# step needs a valid AEA posture cookie (2h), so refresh AEA before re-auth and log
+# every step to the shared auth log to measure how long the O365 token really lasts.
+
+LOG="$HOME/.local/state/mwinit-refresh/auth.log"
+mkdir -p "$(dirname "$LOG")"
+log() { echo "$(date +%FT%T) mailsync $*" >> "$LOG"; }
+
+imap_ok() {
+    echo "a LOGIN wssmts@amazon.com oauth" | nc -q1 localhost 1143 2>/dev/null | grep -q "OK Authenticated"
+}
 
 pgrep -x mbsync >/dev/null && echo "mbsync already running." && exit 0
 
-# Refresh token if auth is stale
-if ! echo "a LOGIN wssmts@amazon.com oauth" | nc -q1 localhost 1143 2>/dev/null | grep -q "OK Authenticated"; then
-    ~/bin/davmail-refresh > /tmp/davmail-refresh.log 2>&1
+if ! imap_ok; then
+    log auth-stale
+    # Failsafe 1: the SSO hop rejects an expired AEA cookie (403 posture_error). Cheap, no key.
+    mwinit-refresh aea
+    if ~/bin/davmail-refresh > /tmp/davmail-refresh.log 2>&1; then
+        log refresh-ok
+    else
+        log refresh-failed "$(tr '\n' ' ' < /tmp/davmail-refresh.log | cut -c1-200)"
+        # Failsafe 2: if the Midway web session itself is dead, only a real mwinit helps.
+        # Trigger the renewal dialog via systemd so it runs in the graphical session.
+        if ! curl -s -m 5 -b ~/.midway/cookie https://midway-auth.amazon.com/api/session-status \
+                | grep -q '"authenticated":true'; then
+            log midway-session-dead "triggering mwinit-refresh dialog"
+            systemctl --user start mwinit-refresh.service 2>/dev/null \
+                || notify-send -a mailsync "Mail auth failed" "Midway session expired: run mwinit-refresh renew"
+        fi
+    fi
 fi
 
 # Sync boxes explicitly instead of `mbsync -a`.
@@ -20,11 +47,12 @@ if [ $exit_code -eq 0 ]; then
     date +%s > /tmp/mailsync-last
     mail-notify > /dev/null
     echo "Sync complete."
-elif echo "a LOGIN wssmts@amazon.com oauth" | nc -q1 localhost 1143 2>/dev/null | grep -q "OK Authenticated"; then
+elif imap_ok; then
     # Auth works, partial sync (UIDVALIDITY errors etc.) — still mark as synced
     date +%s > /tmp/mailsync-last
     mail-notify > /dev/null
     echo "Sync partial (exit $exit_code)"
 else
+    log sync-failed "exit=$exit_code auth still stale"
     echo "mbsync failed (exit $exit_code)"
 fi
