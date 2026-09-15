@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""mwinit-refresh: renew Midway (mwinit -f) with dialogs and lockout safeguards.
+
+Subcommands:
+  status          Print waybar JSON. Reads local files + the read-only Midway
+                  session-status API. Never calls mwinit.
+  renew [--auto]  Renew Midway. --auto (used by the systemd timer) only acts when
+                  the credential is close to expiry and respects snoozes.
+  reset           Clear the failure counter after a lockout-protection stop.
+
+Credential lifetimes (mwinit 2.5.8, verified 2026-09): web session cookie ~20h,
+SSH certificate 12h, AEA cookie 2h. The AEA cookie is refreshed without the key
+via `mwinit --refresh-aea`; the other two need a real `mwinit -f`.
+
+Safeguards against YubiKey PIN lockout (the key blocks after 3 consecutive wrong
+PINs per insertion and permanently after 8 total; a previous automation burned
+those retries):
+  * The PIN is sent to mwinit exactly once per invocation. mwinit re-prompts on a
+    wrong PIN; we kill it the moment we see "Incorrect on-token PIN" instead.
+  * A failure counter is incremented *before* mwinit is spawned and cleared only
+    on verified success. At MAX_FAILURES an error dialog is shown and no further
+    attempts happen until `mwinit-refresh reset` (or the dialog's reset button).
+  * Nothing touches the hardware key until you click "Renew" in the dialog.
+  * A failed mwinit run overwrites ~/.midway/cookie with a dead session, so the
+    file is backed up before each attempt and restored on failure.
+"""
+import argparse
+import fcntl
+import json
+import re
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import pexpect
+
+MAX_FAILURES = 2
+RENEW_BEFORE = 30 * 60      # --auto renews when less than this is left
+WARN_BEFORE = 2 * 3600      # waybar turns yellow below this
+SNOOZE = 30 * 60            # "Later" postpones --auto prompts this long
+AEA_REFRESH_BEFORE = 20 * 60
+PIN_TIMEOUT = 60
+TOUCH_TIMEOUT = 90
+PASS_ENTRY = "amazon/midway"  # optional: PIN in `pass`; otherwise a dialog asks
+
+HOME = Path.home()
+COOKIE_FILE = HOME / ".midway" / "cookie"
+STATE_DIR = HOME / ".local" / "state" / "mwinit-refresh"
+FAILURES_FILE = STATE_DIR / "failures"
+SNOOZE_FILE = STATE_DIR / "snooze_until"
+LOCK_NOTIFIED_FILE = STATE_DIR / "lock_notified"
+COOKIE_BACKUP = STATE_DIR / "cookie.bak"
+SESSION_STATUS_URL = "https://midway-auth.amazon.com/api/session-status"
+
+
+# --- state -----------------------------------------------------------------
+
+def read_int(path: Path) -> int:
+    try:
+        return int(path.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
+def write_int(path: Path, value: int) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{value}\n")
+
+
+def unlink_quiet(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def clear_failures() -> None:
+    unlink_quiet(FAILURES_FILE)
+    unlink_quiet(LOCK_NOTIFIED_FILE)
+
+
+# --- credential inspection (never calls mwinit) ----------------------------
+
+def cert_expiry() -> float:
+    """Earliest 'Valid: ... to' of the Midway-signed SSH certs, 0 if none."""
+    expiries = []
+    for cert in (HOME / ".ssh").glob("*-cert.pub"):
+        out = subprocess.run(["ssh-keygen", "-L", "-f", str(cert)],
+                             capture_output=True, text=True).stdout
+        m = re.search(r"Valid: from \S+ to (\S+)", out)
+        if m:
+            expiries.append(datetime.fromisoformat(m[1]).timestamp())
+    return min(expiries, default=0)
+
+
+def cookie_expiry(name: str, host_suffix: str = "midway-auth.amazon.com") -> float:
+    """Expiry column of a Netscape cookie-jar entry, 0 if absent."""
+    try:
+        lines = COOKIE_FILE.read_text().splitlines()
+    except FileNotFoundError:
+        return 0
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) >= 7 and parts[0].endswith(host_suffix) and parts[5] == name:
+            return int(parts[4])
+    return 0
+
+
+def web_session_expiry() -> float | None:
+    """Ask Midway whether the cookie file's session is really authenticated.
+
+    A failed mwinit run leaves a 'session' cookie with a future expiry that is
+    not authenticated, so the expiry column alone lies. Returns the expiry
+    timestamp, 0 if unauthenticated, or None when the API is unreachable.
+    """
+    if not COOKIE_FILE.exists():
+        return 0
+    try:
+        out = subprocess.run(["curl", "-s", "-m", "5", "-b", str(COOKIE_FILE), SESSION_STATUS_URL],
+                             capture_output=True, text=True, timeout=8, check=True).stdout
+        data = json.loads(out)
+    except (subprocess.SubprocessError, ValueError):
+        return None
+    if not data.get("authenticated"):
+        return 0
+    return float(data.get("expires_at") or cookie_expiry("session"))
+
+
+def midway_expiry() -> float:
+    web = web_session_expiry()
+    if web is None:  # offline: fall back to the file's own claim
+        web = cookie_expiry("session")
+    return min(cert_expiry(), web)
+
+
+def fmt_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds <= 0:
+        return "expired"
+    h, m = divmod(seconds // 60, 60)
+    return f"{h}h{m:02d}m" if h else f"{m}m"
+
+
+def fmt_ts(ts: float) -> str:
+    return datetime.fromtimestamp(ts).strftime("%a %H:%M") if ts else "none"
+
+
+def refresh_aea_cookie() -> None:
+    """Local-only refresh of the 2h AEA cookie; mwinit skips it if the session is dead."""
+    try:
+        subprocess.run(["mwinit", "--refresh-aea"], capture_output=True, timeout=15)
+    except subprocess.SubprocessError as e:
+        print(f"AEA refresh failed: {e}", file=sys.stderr)
+
+
+# --- dialogs ---------------------------------------------------------------
+
+def zenity(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["zenity", *args], capture_output=True, text=True)
+
+
+def show_error(text: str) -> None:
+    zenity("--error", "--title=Midway renewal failed", "--width=420", f"--text={text}")
+
+
+def notify(summary: str, body: str = "") -> None:
+    subprocess.run(["notify-send", "-a", "mwinit-refresh", summary, body])
+
+
+def ask_pin() -> str | None:
+    try:
+        out = subprocess.run(["pass", "show", PASS_ENTRY], capture_output=True, text=True, check=True).stdout
+        pin = out.splitlines()[0].strip()
+        if pin:
+            return pin
+    except (subprocess.CalledProcessError, FileNotFoundError, IndexError):
+        pass
+    res = zenity("--password", "--title=YubiKey on-token PIN")
+    return (res.stdout.strip() or None) if res.returncode == 0 else None
+
+
+# --- renewal ---------------------------------------------------------------
+
+def run_mwinit(pin: str) -> tuple[bool, str]:
+    """Run `mwinit -f` once. Returns (success, message). Sends the PIN at most once."""
+    child = pexpect.spawn("mwinit", ["-f"], encoding="utf-8", timeout=PIN_TIMEOUT)
+    info_box = None
+    try:
+        i = child.expect([r"Enter the on-token PIN of your security key:",
+                          r"Please enter your Midway PIN:",
+                          r"Multiple security keys",
+                          pexpect.EOF, pexpect.TIMEOUT])
+        if i >= 2:
+            return False, f"mwinit did not ask for a PIN:\n{child.before.strip()[-600:]}"
+        child.sendline(pin)
+
+        i = child.expect([r"Touch the security key",
+                          r"Incorrect on-token PIN[^\r\n]*",
+                          r"(locked|blocked|too many incorrect)[^\r\n]*",
+                          pexpect.EOF, pexpect.TIMEOUT])
+        if i != 0:
+            # Never answer a re-prompt: kill mwinit before it can ask again.
+            child.terminate(force=True)
+            detail = child.after if isinstance(child.after, str) else child.before.strip()[-600:]
+            return False, f"PIN rejected or key unavailable:\n{detail}"
+
+        info_box = subprocess.Popen(["zenity", "--info", "--title=Midway renewal",
+                                     "--text=Touch your YubiKey now."])
+        i = child.expect([r"Successfully authenticated", r"Authentication (failed|cannot)[^\r\n]*",
+                          r"ERROR[^\r\n]*", pexpect.EOF, pexpect.TIMEOUT], timeout=TOUCH_TIMEOUT)
+        if i != 0:
+            child.terminate(force=True)
+            detail = child.after if isinstance(child.after, str) else "timed out waiting for touch"
+            return False, f"Touch step failed:\n{detail}"
+
+        child.expect(pexpect.EOF, timeout=60)
+        child.wait()
+        if child.exitstatus != 0:
+            return False, f"mwinit exited with status {child.exitstatus}:\n{child.before.strip()[-600:]}"
+        return True, ""
+    finally:
+        if info_box and info_box.poll() is None:
+            info_box.terminate()
+        if child.isalive():
+            child.terminate(force=True)
+
+
+def renew(auto: bool) -> int:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    lock = open(STATE_DIR / "lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("another mwinit-refresh is running", file=sys.stderr)
+        return 0
+
+    failures = read_int(FAILURES_FILE)
+    if failures >= MAX_FAILURES:
+        if auto and LOCK_NOTIFIED_FILE.exists():
+            return 1  # already told the user once; stay quiet until reset
+        write_int(LOCK_NOTIFIED_FILE, 1)
+        res = zenity("--question", "--title=Midway renewal stopped", "--width=460",
+                     f"--text={failures} consecutive mwinit attempts failed.\n\n"
+                     "To protect the YubiKey from a PIN lockout, automatic renewal is paused. "
+                     f"Check the PIN (pass entry '{PASS_ENTRY}' if used) and the key.\n\n"
+                     "Reset the counter and try again now?",
+                     "--ok-label=Reset and retry", "--cancel-label=Close")
+        if res.returncode != 0:
+            return 1
+        clear_failures()
+        failures = 0
+
+    if cookie_expiry("amazon_enterprise_access") - time.time() < AEA_REFRESH_BEFORE:
+        refresh_aea_cookie()
+
+    old_expiry = midway_expiry()
+    time_left = old_expiry - time.time()
+    if auto and (time_left > RENEW_BEFORE or read_int(SNOOZE_FILE) > time.time()):
+        return 0
+
+    res = zenity("--question", "--title=Midway renewal", "--width=420",
+                 f"--text=Midway credentials: {fmt_duration(time_left)}"
+                 f"{'' if time_left <= 0 else ' left'}.\n\n"
+                 "Plug in your YubiKey, click Renew, then touch the key when asked.",
+                 "--ok-label=Renew", f"--cancel-label=Later ({SNOOZE // 60} min)")
+    if res.returncode != 0:
+        write_int(SNOOZE_FILE, int(time.time() + SNOOZE))
+        return 0
+
+    pin = ask_pin()
+    if pin is None:
+        return 0  # cancelled before anything touched the key; not counted
+
+    # Count the attempt before spawning so crashes/kills can't bypass the cap.
+    write_int(FAILURES_FILE, failures + 1)
+    if COOKIE_FILE.exists():
+        shutil.copy2(COOKIE_FILE, COOKIE_BACKUP)
+    ok, message = run_mwinit(pin)
+    if ok:
+        # mwinit can exit 0 with nothing renewed; trust the credentials, not the exit code.
+        new_expiry = midway_expiry()
+        if new_expiry <= max(old_expiry, time.time()):
+            ok, message = False, "mwinit reported success but credentials did not renew."
+    if not ok:
+        if COOKIE_BACKUP.exists():
+            shutil.copy2(COOKIE_BACKUP, COOKIE_FILE)  # failed run leaves a dead session behind
+        remaining = MAX_FAILURES - (failures + 1)
+        show_error(f"{message}\n\nAttempts left before automatic renewal pauses: {remaining}")
+        return 1
+
+    clear_failures()
+    unlink_quiet(SNOOZE_FILE)
+    unlink_quiet(COOKIE_BACKUP)
+    notify("Midway renewed", f"Valid until {fmt_ts(new_expiry)}")
+    return 0
+
+
+# --- waybar ----------------------------------------------------------------
+
+def status() -> int:
+    cert = cert_expiry()
+    web = web_session_expiry()
+    aea = cookie_expiry("amazon_enterprise_access")
+    now = time.time()
+    left = min(cert, cookie_expiry("session") if web is None else web) - now
+    failures = read_int(FAILURES_FILE)
+
+    if failures >= MAX_FAILURES:
+        text, cls = "🔑 paused", "locked"
+    elif left <= 0:
+        text, cls = "🔑 expired", "expired"
+    elif left < WARN_BEFORE:
+        text, cls = f"🔑 {fmt_duration(left)}", "warn"
+    else:
+        text, cls = f"🔑 {fmt_duration(left)}", "ok"
+
+    web_line = ("Web session: offline, unverified" if web is None
+                else "Web session: not authenticated" if web == 0
+                else f"Web session until {fmt_ts(web)}")
+    tooltip = [f"SSH cert until {fmt_ts(cert)}", web_line, f"AEA cookie until {fmt_ts(aea)}"]
+    if failures:
+        tooltip.append(f"Failed attempts: {failures}/{MAX_FAILURES}")
+    snooze = read_int(SNOOZE_FILE)
+    if snooze > now:
+        tooltip.append(f"Snoozed until {fmt_ts(snooze)}")
+    tooltip.append("Click to renew now")
+    print(json.dumps({"text": text, "tooltip": "\n".join(tooltip), "class": cls}))
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status")
+    p_renew = sub.add_parser("renew")
+    p_renew.add_argument("--auto", action="store_true")
+    sub.add_parser("reset")
+    args = parser.parse_args()
+
+    if args.cmd == "status":
+        return status()
+    if args.cmd == "reset":
+        clear_failures()
+        unlink_quiet(SNOOZE_FILE)
+        print("failure counter and snooze cleared")
+        return 0
+    return renew(args.auto)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

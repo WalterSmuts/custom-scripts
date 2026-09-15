@@ -1,0 +1,7 @@
+[Unit]
+Description=Renew Midway credentials (dialog + YubiKey) when close to expiry
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/mwinit-refresh renew --auto
+# No Restart=: the script owns the attempt budget; systemd must never re-run a failed attempt.
