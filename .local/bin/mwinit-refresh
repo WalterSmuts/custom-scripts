@@ -8,8 +8,9 @@ Subcommands:
                   the credential is close to expiry and respects snoozes.
   reset           Clear the failure counter after a lockout-protection stop.
   aea             Refresh only the 2h AEA cookie (no key). Failsafe for mailsync.
-  push            Copy ~/.midway/cookie to REMOTE_HOST (dev desktop) if ours is newer.
-                  Also happens automatically after a renewal or AEA refresh.
+  push            Reload key+cert into the forwarded midway-ssh-agent and copy
+                  ~/.midway/cookie to REMOTE_HOST (dev desktop) if ours is newer.
+                  Also happens automatically after a renewal (cookie: also after AEA refresh).
   log [-n N]      Show recent events from the shared auth log
                   (~/.local/state/mwinit-refresh/auth.log; mailsync and
                   davmail-refresh log there too, so gaps between
@@ -54,6 +55,8 @@ PIN_TIMEOUT = 60
 TOUCH_TIMEOUT = 90
 PASS_ENTRY = "amazon/midway"  # optional: PIN in `pass`; otherwise a dialog asks
 REMOTE_HOST = "clouddesk"     # ssh alias to push the cookie file to; "" disables
+MIDWAY_AGENT_SOCK = Path(f"/run/user/{__import__('os').getuid()}/midway-ssh-agent.sock")
+SSH_KEY = HOME / ".ssh" / "id_ecdsa"  # key whose *-cert.pub mwinit signs
 
 HOME = Path.home()
 COOKIE_FILE = HOME / ".midway" / "cookie"
@@ -178,6 +181,23 @@ def refresh_aea_cookie() -> None:
         push_cookie_to_remote()
     else:
         log("aea-refresh-noop", (res.stdout + res.stderr).strip().replace("\n", " ")[:200])
+
+
+def reload_midway_agent() -> None:
+    """Reload key+cert into the dedicated agent that is forwarded to the dev desktop.
+
+    gpg-agent's ssh emulation silently drops certificates, so a plain ssh-agent
+    (midway-ssh-agent.service) holds the Midway cert for forwarded git/ssh.
+    """
+    if not MIDWAY_AGENT_SOCK.is_socket():
+        log("agent-reload-skipped", "midway-ssh-agent.service not running")
+        return
+    env = {"SSH_AUTH_SOCK": str(MIDWAY_AGENT_SOCK), "PATH": "/usr/bin:/bin"}
+    subprocess.run(["ssh-add", "-D"], env=env, capture_output=True)
+    res = subprocess.run(["ssh-add", str(SSH_KEY)], env=env, capture_output=True, text=True, timeout=15)
+    loaded = subprocess.run(["ssh-add", "-L"], env=env, capture_output=True, text=True).stdout
+    ok = res.returncode == 0 and "-cert-" in loaded
+    log("agent-reload-ok" if ok else "agent-reload-error", res.stderr.strip()[:120])
 
 
 def push_cookie_to_remote() -> None:
@@ -356,6 +376,7 @@ def renew(auto: bool) -> int:
     log("mwinit-ok", f"cert={fmt_ts(cert_expiry())} session={fmt_ts(web_session_expiry() or 0)} "
                      f"aea={fmt_ts(cookie_expiry('amazon_enterprise_access'))}")
     notify("Midway renewed", f"Valid until {fmt_ts(new_expiry)}")
+    reload_midway_agent()
     push_cookie_to_remote()
     return 0
 
@@ -409,6 +430,7 @@ def main() -> int:
     if args.cmd == "status":
         return status()
     if args.cmd == "push":
+        reload_midway_agent()
         push_cookie_to_remote()
         return 0
     if args.cmd == "aea":
