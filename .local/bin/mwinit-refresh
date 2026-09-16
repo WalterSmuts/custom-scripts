@@ -36,6 +36,7 @@ those retries):
 import argparse
 import fcntl
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -55,11 +56,11 @@ PIN_TIMEOUT = 60
 TOUCH_TIMEOUT = 90
 PASS_ENTRY = "amazon/midway"  # optional: PIN in `pass`; otherwise a dialog asks
 REMOTE_HOST = "clouddesk"     # ssh alias to push the cookie file to; "" disables
-MIDWAY_AGENT_SOCK = Path(f"/run/user/{__import__('os').getuid()}/midway-ssh-agent.sock")
-SSH_KEY = HOME / ".ssh" / "id_ecdsa"  # key whose *-cert.pub mwinit signs
 
 HOME = Path.home()
 COOKIE_FILE = HOME / ".midway" / "cookie"
+SSH_KEY = HOME / ".ssh" / "id_ecdsa"  # key whose *-cert.pub mwinit signs
+MIDWAY_AGENT_SOCK = Path(f"/run/user/{os.getuid()}/midway-ssh-agent.sock")
 STATE_DIR = HOME / ".local" / "state" / "mwinit-refresh"
 FAILURES_FILE = STATE_DIR / "failures"
 SNOOZE_FILE = STATE_DIR / "snooze_until"
