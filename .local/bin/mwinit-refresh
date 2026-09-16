@@ -198,7 +198,7 @@ def reload_midway_agent() -> None:
     res = subprocess.run(["ssh-add", str(SSH_KEY)], env=env, capture_output=True, text=True, timeout=15)
     loaded = subprocess.run(["ssh-add", "-L"], env=env, capture_output=True, text=True).stdout
     ok = res.returncode == 0 and "-cert-" in loaded
-    log("agent-reload-ok" if ok else "agent-reload-error", res.stderr.strip()[:120])
+    log("agent-reload-ok" if ok else "agent-reload-error", res.stderr.strip().replace("\n", "; ")[:160])
 
 
 def push_cookie_to_remote() -> None:
