@@ -8,6 +8,8 @@ Subcommands:
                   the credential is close to expiry and respects snoozes.
   reset           Clear the failure counter after a lockout-protection stop.
   aea             Refresh only the 2h AEA cookie (no key). Failsafe for mailsync.
+  push            Copy ~/.midway/cookie to REMOTE_HOST (dev desktop) if ours is newer.
+                  Also happens automatically after a renewal or AEA refresh.
   log [-n N]      Show recent events from the shared auth log
                   (~/.local/state/mwinit-refresh/auth.log; mailsync and
                   davmail-refresh log there too, so gaps between
@@ -51,6 +53,7 @@ AEA_REFRESH_BEFORE = 20 * 60
 PIN_TIMEOUT = 60
 TOUCH_TIMEOUT = 90
 PASS_ENTRY = "amazon/midway"  # optional: PIN in `pass`; otherwise a dialog asks
+REMOTE_HOST = "clouddesk"     # ssh alias to push the cookie file to; "" disables
 
 HOME = Path.home()
 COOKIE_FILE = HOME / ".midway" / "cookie"
@@ -172,8 +175,37 @@ def refresh_aea_cookie() -> None:
     after = cookie_expiry("amazon_enterprise_access")
     if after > before:
         log("aea-refresh-ok", f"until={fmt_ts(after)}")
+        push_cookie_to_remote()
     else:
         log("aea-refresh-noop", (res.stdout + res.stderr).strip().replace("\n", " ")[:200])
+
+
+def push_cookie_to_remote() -> None:
+    """Copy ~/.midway/cookie to the dev desktop if ours is newer (precedent: mwinit-and-ssh-manager).
+
+    Covers HTTP/cookie-based tools there. The remote's own SSH cert and MCS session
+    token are not touched; those still need `mwinit -o` on the remote.
+    """
+    if not REMOTE_HOST or not COOKIE_FILE.exists():
+        return
+    ssh_opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ControlMaster=no"]
+    try:
+        remote = subprocess.run(["ssh", *ssh_opts, REMOTE_HOST, "stat -c %Y .midway/cookie 2>/dev/null || echo 0"],
+                                capture_output=True, text=True, timeout=30)
+        remote_mtime = int(remote.stdout.strip() or 0)
+    except (subprocess.SubprocessError, ValueError) as e:
+        log("push-cookie-error", f"host={REMOTE_HOST} {e}")
+        return
+    if remote.returncode != 0:
+        log("push-cookie-error", f"host={REMOTE_HOST} ssh rc={remote.returncode} {remote.stderr.strip()[:120]}")
+        return
+    if remote_mtime >= COOKIE_FILE.stat().st_mtime:
+        log("push-cookie-skipped", f"host={REMOTE_HOST} remote cookie is newer")
+        return
+    res = subprocess.run(["scp", "-p", *ssh_opts, str(COOKIE_FILE), f"{REMOTE_HOST}:.midway/cookie"],
+                         capture_output=True, text=True, timeout=60)
+    log("push-cookie-ok" if res.returncode == 0 else "push-cookie-error",
+        f"host={REMOTE_HOST} {res.stderr.strip()[:120]}")
 
 
 # --- dialogs ---------------------------------------------------------------
@@ -324,6 +356,7 @@ def renew(auto: bool) -> int:
     log("mwinit-ok", f"cert={fmt_ts(cert_expiry())} session={fmt_ts(web_session_expiry() or 0)} "
                      f"aea={fmt_ts(cookie_expiry('amazon_enterprise_access'))}")
     notify("Midway renewed", f"Valid until {fmt_ts(new_expiry)}")
+    push_cookie_to_remote()
     return 0
 
 
@@ -367,6 +400,7 @@ def main() -> int:
     p_renew = sub.add_parser("renew")
     p_renew.add_argument("--auto", action="store_true")
     sub.add_parser("reset")
+    sub.add_parser("push", help="push ~/.midway/cookie to the dev desktop if ours is newer")
     sub.add_parser("aea", help="refresh the AEA cookie only (no hardware key); used as a failsafe by mailsync")
     p_log = sub.add_parser("log", help="show recent auth events")
     p_log.add_argument("-n", type=int, default=40)
@@ -374,6 +408,9 @@ def main() -> int:
 
     if args.cmd == "status":
         return status()
+    if args.cmd == "push":
+        push_cookie_to_remote()
+        return 0
     if args.cmd == "aea":
         refresh_aea_cookie()
         return 0
