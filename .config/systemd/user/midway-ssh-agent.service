@@ -3,6 +3,7 @@ Description=Dedicated ssh-agent holding the Midway-signed SSH key+cert (forwarde
 
 [Service]
 Type=simple
+ExecStartPre=/bin/rm -f %t/midway-ssh-agent.sock
 ExecStart=/usr/bin/ssh-agent -D -a %t/midway-ssh-agent.sock
 # Load key+cert once the agent is up; mwinit-refresh reloads it after each renewal.
 ExecStartPost=/bin/sh -c 'for i in 1 2 3 4 5; do [ -S %t/midway-ssh-agent.sock ] && break; sleep 0.2; done; SSH_AUTH_SOCK=%t/midway-ssh-agent.sock ssh-add %h/.ssh/id_ecdsa'
