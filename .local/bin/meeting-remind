@@ -1,0 +1,59 @@
+#!/bin/bash
+# meeting-remind: notify 5 minutes before upcoming calendar events
+# Run every minute via cron/systemd timer. Uses a state file to avoid re-notifying.
+
+CALDIR="$HOME/.local/share/calendars/amazon/calendar"
+STATE="/tmp/meeting-remind-notified"
+AHEAD=300  # seconds before event to notify
+
+touch "$STATE"
+now=$(date +%s)
+window_start=$((now))
+window_end=$((now + AHEAD))
+
+for f in "$CALDIR"/*.ics; do
+  [ -f "$f" ] || continue
+
+  # Extract DTSTART and SUMMARY
+  dtstart=$(grep -m1 "^DTSTART" "$f" | sed 's/DTSTART[^:]*://')
+  summary=$(grep -m1 "^SUMMARY:" "$f" | sed 's/SUMMARY://')
+  [ -z "$dtstart" ] || [ -z "$summary" ] && continue
+
+  # Parse UTC timestamp (YYYYMMDDTHHMMSSZ)
+  if echo "$dtstart" | grep -q 'Z$'; then
+    event_ts=$(date -u -d "${dtstart:0:4}-${dtstart:4:2}-${dtstart:6:2}T${dtstart:9:2}:${dtstart:11:2}:${dtstart:13:2}Z" +%s 2>/dev/null)
+  else
+    # Non-UTC (local time assumed)
+    event_ts=$(date -d "${dtstart:0:4}-${dtstart:4:2}-${dtstart:6:2}T${dtstart:9:2}:${dtstart:11:2}:${dtstart:13:2}" +%s 2>/dev/null)
+  fi
+  [ -z "$event_ts" ] && continue
+
+  # Skip all-day events (24h duration)
+  dtend=$(grep -m1 "^DTEND" "$f" | sed 's/DTEND[^:]*://')
+  if [ -n "$dtend" ]; then
+    if echo "$dtend" | grep -q 'Z$'; then
+      end_ts=$(date -u -d "${dtend:0:4}-${dtend:4:2}-${dtend:6:2}T${dtend:9:2}:${dtend:11:2}:${dtend:13:2}Z" +%s 2>/dev/null)
+    else
+      end_ts=$(date -d "${dtend:0:4}-${dtend:4:2}-${dtend:6:2}T${dtend:9:2}:${dtend:11:2}:${dtend:13:2}" +%s 2>/dev/null)
+    fi
+    [ -n "$end_ts" ] && [ $((end_ts - event_ts)) -ge 86400 ] && continue
+  fi
+
+  # Check if event starts within the notification window
+  if [ "$event_ts" -gt "$window_start" ] && [ "$event_ts" -le "$window_end" ]; then
+    # Deduplicate by event UID or filename
+    key=$(basename "$f")
+    grep -qxF "$key" "$STATE" && continue
+    echo "$key" >> "$STATE"
+
+    mins=$(( (event_ts - now + 59) / 60 ))
+    location=$(grep -m1 "^LOCATION:" "$f" | sed 's/LOCATION://')
+    body="in ${mins} min"
+    [ -n "$location" ] && body="$body\n$location"
+
+    notify-send -u critical -a "calendar" "📅 $summary" "$body"
+  fi
+done
+
+# Trim state file daily (keep last 200 entries)
+tail -200 "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"

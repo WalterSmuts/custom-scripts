@@ -1,0 +1,6 @@
+[Unit]
+Description=Meeting reminder notifications
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/meeting-remind
