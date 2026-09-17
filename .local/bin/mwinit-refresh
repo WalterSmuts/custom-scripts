@@ -5,7 +5,9 @@ Subcommands:
   status          Print waybar JSON. Reads local files + the read-only Midway
                   session-status API. Never calls mwinit.
   renew [--auto]  Renew Midway. --auto (used by the systemd timer) only acts when
-                  the credential is close to expiry and respects snoozes.
+                  the credential is close to expiry and stays quiet after
+                  "Not now" until the waybar button is clicked or a renewal
+                  succeeds.
   reset           Clear the failure counter after a lockout-protection stop.
   aea             Refresh only the 2h AEA cookie (no key). Failsafe for mailsync.
   push            Reload key+cert into the forwarded midway-ssh-agent and copy
@@ -50,7 +52,6 @@ import pexpect
 MAX_FAILURES = 2
 RENEW_BEFORE = 30 * 60      # --auto renews when less than this is left
 WARN_BEFORE = 2 * 3600      # waybar turns yellow below this
-SNOOZE = 30 * 60            # "Later" postpones --auto prompts this long
 AEA_REFRESH_BEFORE = 20 * 60
 PIN_TIMEOUT = 60
 TOUCH_TIMEOUT = 90
@@ -63,7 +64,7 @@ SSH_KEY = HOME / ".ssh" / "id_ecdsa"  # key whose *-cert.pub mwinit signs
 MIDWAY_AGENT_SOCK = Path(f"/run/user/{os.getuid()}/midway-ssh-agent.sock")
 STATE_DIR = HOME / ".local" / "state" / "mwinit-refresh"
 FAILURES_FILE = STATE_DIR / "failures"
-SNOOZE_FILE = STATE_DIR / "snooze_until"
+MUTED_FILE = STATE_DIR / "muted"  # "Not now" was clicked: --auto stays silent until click/success
 LOCK_NOTIFIED_FILE = STATE_DIR / "lock_notified"
 COOKIE_BACKUP = STATE_DIR / "cookie.bak"
 LOG_FILE = STATE_DIR / "auth.log"  # shared with mailsync/davmail-refresh to measure real lifetimes
@@ -332,18 +333,20 @@ def renew(auto: bool) -> int:
 
     old_expiry = midway_expiry()
     time_left = old_expiry - time.time()
-    if auto and (time_left > RENEW_BEFORE or read_int(SNOOZE_FILE) > time.time()):
+    if auto and (time_left > RENEW_BEFORE or MUTED_FILE.exists()):
         return 0
+    if not auto:
+        unlink_quiet(MUTED_FILE)  # a click re-arms the automatic prompt
 
     if auto:  # a waybar click is already explicit consent; only the timer asks first
         res = zenity("--question", "--title=Midway renewal", "--width=420",
                      f"--text=Midway credentials: {fmt_duration(time_left)}"
                      f"{'' if time_left <= 0 else ' left'}.\n\n"
                      "Plug in your YubiKey, click Renew, then touch the key when asked.",
-                     "--ok-label=Renew", f"--cancel-label=Later ({SNOOZE // 60} min)")
+                     "--ok-label=Renew", "--cancel-label=Not now")
         if res.returncode != 0:
-            write_int(SNOOZE_FILE, int(time.time() + SNOOZE))
-            log("snoozed", f"left={fmt_duration(time_left)}")
+            write_int(MUTED_FILE, 1)
+            log("muted", f"left={fmt_duration(time_left)}")
             return 0
 
     pin = ask_pin()
@@ -372,7 +375,7 @@ def renew(auto: bool) -> int:
         return 1
 
     clear_failures()
-    unlink_quiet(SNOOZE_FILE)
+    unlink_quiet(MUTED_FILE)
     unlink_quiet(COOKIE_BACKUP)
     log("mwinit-ok", f"cert={fmt_ts(cert_expiry())} session={fmt_ts(web_session_expiry() or 0)} "
                      f"aea={fmt_ts(cookie_expiry('amazon_enterprise_access'))}")
@@ -407,9 +410,8 @@ def status() -> int:
     tooltip = [f"SSH cert until {fmt_ts(cert)}", web_line, f"AEA cookie until {fmt_ts(aea)}"]
     if failures:
         tooltip.append(f"Failed attempts: {failures}/{MAX_FAILURES}")
-    snooze = read_int(SNOOZE_FILE)
-    if snooze > now:
-        tooltip.append(f"Snoozed until {fmt_ts(snooze)}")
+    if MUTED_FILE.exists():
+        tooltip.append("Auto-prompt muted (click to renew and re-arm)")
     tooltip.append("Click to renew now")
     print(json.dumps({"text": text, "tooltip": "\n".join(tooltip), "class": cls}))
     return 0
@@ -446,8 +448,8 @@ def main() -> int:
     if args.cmd == "reset":
         log("reset")
         clear_failures()
-        unlink_quiet(SNOOZE_FILE)
-        print("failure counter and snooze cleared")
+        unlink_quiet(MUTED_FILE)
+        print("failure counter and mute cleared")
         return 0
     return renew(args.auto)
 
