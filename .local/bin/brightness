@@ -1,0 +1,29 @@
+#!/bin/bash
+# Perceptual brightness control using fixed steps.
+# Steps are denser at low brightness where human eyes are more sensitive.
+# Steps in per-mille (thousandths) for sub-1% precision
+steps=(0 1 2 5 10 20 50 100 200 300 500 700 1000 1400 1900 2500 3200 4000 5000 6200 7500 9000 10000)
+
+max=$(brightnessctl max)
+cur=$(brightnessctl get)
+
+# Find nearest step index using raw values
+nearest=0
+for i in "${!steps[@]}"; do
+    step_val=$((steps[$i] * max / 10000))
+    if (( cur >= step_val )); then
+        nearest=$i
+    fi
+done
+
+case "$1" in
+    up)   idx=$((nearest + 1)) ;;
+    down) idx=$((nearest - 1)) ;;
+    *)    echo "Usage: brightness up|down"; exit 1 ;;
+esac
+
+# Clamp
+(( idx < 0 )) && idx=0
+(( idx >= ${#steps[@]} )) && idx=$(( ${#steps[@]} - 1 ))
+
+brightnessctl set "$((steps[$idx] * max / 10000))" -q
