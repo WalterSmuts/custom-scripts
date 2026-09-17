@@ -3,19 +3,39 @@
 import subprocess, xml.etree.ElementTree as ET, os, hashlib
 from datetime import datetime, timedelta
 
-CAL_DIR = os.path.expanduser("~/.local/share/calendars/amazon")
-EWS_URL = "https://ballard.amazon.com/EWS/Exchange.asmx"
-# AFTER M365 MIGRATION: change EWS_URL to https://outlook.office365.com/EWS/Exchange.asmx
+CAL_DIR = os.path.expanduser("~/.local/share/calendars/amazon/calendar")
+EWS_URL = "https://outlook.office365.com/EWS/Exchange.asmx"
 NS = {"t": "http://schemas.microsoft.com/exchange/services/2006/types",
       "m": "http://schemas.microsoft.com/exchange/services/2006/messages"}
 
-def get_pass():
-    return subprocess.run(["pass", "amazon/mail"], capture_output=True, text=True).stdout.strip()
+def get_access_token():
+    """Get OAuth access token using DavMail's refresh token."""
+    props = os.path.expanduser("~/.davmail.properties")
+    rt = ""
+    with open(props) as f:
+        for line in f:
+            if "wssmts@amazon.com.refreshToken=" in line:
+                rt = line.split("=", 1)[1].strip()
+    r = subprocess.run(
+        ["curl", "-sS",
+         "-d", "client_id=d3590ed6-52b3-4102-aeff-aad2292ab01c",
+         "-d", "grant_type=refresh_token",
+         "-d", f"refresh_token={rt}",
+         "-d", "resource=https://outlook.office365.com",
+         "https://login.microsoftonline.com/common/oauth2/token"],
+        capture_output=True, text=True)
+    import json
+    return json.loads(r.stdout).get("access_token", "")
 
 def ews_request(soap):
+    token = get_access_token()
+    if not token:
+        raise RuntimeError("Failed to get access token")
     r = subprocess.run(
-        ["curl", "-sS", "--ntlm", "-u", f"ANT\\wssmts:{get_pass()}",
-         "-H", "Content-Type: text/xml", "-d", soap, EWS_URL],
+        ["curl", "-sS",
+         "-H", "Content-Type: text/xml",
+         "-H", f"Authorization: Bearer {token}",
+         "-d", soap, EWS_URL],
         capture_output=True, text=True)
     return r.stdout
 
