@@ -1,0 +1,9 @@
+[Unit]
+Description=DavMail Exchange Gateway
+
+[Service]
+ExecStart=/usr/bin/davmail-server %h/.davmail.properties
+Restart=always
+
+[Install]
+WantedBy=default.target
