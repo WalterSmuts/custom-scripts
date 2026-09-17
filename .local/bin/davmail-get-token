@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Automated OAuth token refresh for DavMail via Midway auth."""
+import re, subprocess, os, html as htmlmod, sys
+
+E = {**os.environ, 'SSL_CERT_FILE': '/etc/ssl/certs/ca-certificates.crt',
+     'PATH': '/home/linuxbrew/.linuxbrew/bin:/usr/bin:/usr/local/bin:' + os.environ.get('PATH','')}
+CK = os.path.expanduser('~/.midway/cookie')
+
+def curl(url, data=None, follow=True, raw=False):
+    args = ['curl','-sS','-b',CK,'-c',CK]
+    if follow: args.append('-L')
+    if raw: args.append('-D-')
+    if data:
+        for k,v in data.items():
+            args.extend(['--data-urlencode', f'{k}={v}'])
+    args.append(url)
+    return subprocess.run(args, capture_output=True, text=True, env=E).stdout
+
+def form(h):
+    a = re.search(r'action="([^"]*)"', h)
+    f = {k: htmlmod.unescape(v) for k,v in re.findall(r'name="([^"]*)" value="([^"]*)"', h)}
+    return (htmlmod.unescape(a.group(1)) if a else None), f
+
+AUTH = ("https://login.microsoftonline.com/common/oauth2/authorize?"
+    "client_id=d3590ed6-52b3-4102-aeff-aad2292ab01c&response_type=code"
+    "&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&response_mode=query"
+    "&login_hint=wssmts%40amazon.com&resource=https%3A%2F%2Foutlook.office365.com")
+
+h = curl(AUTH, follow=False)
+for i in range(15):
+    a, f = form(h)
+    if not a:
+        break
+    h = curl(a, f, follow='federate.amazon.com' in a, raw='federate.amazon.com' not in a)
+    for line in h.split('\n'):
+        if 'ocation:' in line.lower() and 'code=' in line:
+            code = re.search(r'code=([^&\s]+)', line).group(1)
+            open('/tmp/oauth_code.txt','w').write(code)
+            print(f"OK code={len(code)} chars")
+            sys.exit(0)
+    if 'federate.amazon.com' not in (a or ''):
+        h = re.split(r'\r?\n\r?\n', h, maxsplit=1)[-1]
+
+print("FAIL")
+sys.exit(1)

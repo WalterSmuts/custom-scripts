@@ -1,0 +1,52 @@
+#!/bin/bash
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export PATH="/home/linuxbrew/.linuxbrew/bin:/usr/bin:/usr/local/bin:$PATH"
+
+LOG="$HOME/.local/state/mwinit-refresh/auth.log"
+mkdir -p "$(dirname "$LOG")"
+log() { echo "$(date +%FT%T) davmail-refresh $*" >> "$LOG"; }
+
+# Get OAuth code via Midway
+if ! "$HOME/.local/bin/davmail-get-token"; then
+  log get-token-failed "SSO chain (MS->Federate->Midway) did not yield a code"
+  echo "FAIL: could not get OAuth code"
+  exit 1
+fi
+CODE=$(cat /tmp/oauth_code.txt)
+
+# Exchange code for refresh token. Log the lifetimes the endpoint reports (never the tokens).
+RESP=$(curl -sS \
+  -d "client_id=d3590ed6-52b3-4102-aeff-aad2292ab01c" \
+  -d "grant_type=authorization_code" \
+  --data-urlencode "code=$CODE" \
+  -d "redirect_uri=urn:ietf:wg:oauth:2.0:oob" \
+  -d "resource=https://outlook.office365.com" \
+  "https://login.microsoftonline.com/common/oauth2/token")
+RT=$(printf '%s' "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('refresh_token',''))")
+META=$(printf '%s' "$RESP" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+keys=('expires_in','ext_expires_in','refresh_token_expires_in','error','error_codes')
+print(' '.join(f'{k}={d[k]}' for k in keys if k in d) or 'no-expiry-fields=' + ','.join(sorted(d)))")
+
+if [ -z "$RT" ]; then
+  log token-exchange-failed "$META"
+  echo "FAIL: no refresh token"
+  exit 1
+fi
+log token-ok "$META"
+
+# Hold the mbsync lock during restart to prevent sync during DavMail downtime
+(
+  flock 9
+
+  # Update DavMail properties
+  sed -i '/refreshToken/d' ~/.davmail.properties
+  echo "davmail.oauth.wssmts@amazon.com.refreshToken=$RT" >> ~/.davmail.properties
+
+  # Restart DavMail via systemd
+  systemctl --user restart davmail
+  sleep 3
+
+) 9>~/.mbsync.lock
+
+echo "OK refreshed"

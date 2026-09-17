@@ -20,7 +20,7 @@ if ! imap_ok; then
     log auth-stale
     # Failsafe 1: the SSO hop rejects an expired AEA cookie (403 posture_error). Cheap, no key.
     mwinit-refresh aea
-    if ~/bin/davmail-refresh > /tmp/davmail-refresh.log 2>&1; then
+    if "$HOME/.local/bin/davmail-refresh" > /tmp/davmail-refresh.log 2>&1; then
         log refresh-ok
     else
         log refresh-failed "$(tr '\n' ' ' < /tmp/davmail-refresh.log | cut -c1-200)"
