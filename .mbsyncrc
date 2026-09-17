@@ -1,0 +1,28 @@
+# Amazon mail via the local DavMail gateway (davmail.service).
+# "oauth" is a placeholder: DavMail swaps it for the token it holds in
+# ~/.davmail.properties, refreshed by davmail-refresh (see mailsync).
+IMAPAccount amazon
+Host localhost
+Port 1143
+User wssmts@amazon.com
+Pass oauth
+SSLType None
+AuthMechs LOGIN
+# Warning about cleartext password is expected — this is localhost-only to DavMail
+
+IMAPStore amazon-remote
+Account amazon
+
+MaildirStore amazon-local
+Subfolders Verbatim
+Path ~/.local/share/mail/amazon/
+Inbox ~/.local/share/mail/amazon/INBOX
+
+Channel amazon
+Far :amazon-remote:
+Near :amazon-local:
+Patterns INBOX Archive "Code Reviews" "Food Menu" Issues Meetings News "On-call tickets" Quip Sent Trash
+Create Near
+Expunge Far
+SyncState *
+Sync All

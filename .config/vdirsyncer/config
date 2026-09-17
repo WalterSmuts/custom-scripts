@@ -1,0 +1,20 @@
+[general]
+status_path = "~/.local/share/vdirsyncer/status/"
+
+[pair amazon]
+a = "amazon_local"
+b = "amazon_remote"
+collections = ["from b"]
+conflict_resolution = "b wins"
+
+[storage amazon_local]
+type = "filesystem"
+path = "~/.local/share/calendars/amazon"
+fileext = ".ics"
+
+[storage amazon_remote]
+type = "caldav"
+url = "http://localhost:1080/users/wssmts@amazon.com/calendar"
+username = "wssmts@amazon.com"
+password = "oauth"
+item_types = ["VEVENT", "VTODO"]
