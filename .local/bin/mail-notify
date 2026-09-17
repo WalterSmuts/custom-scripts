@@ -1,6 +1,6 @@
 #!/bin/bash
 # mail-notify: waybar JSON output + desktop notifications for new mail
-MAIL_DIR="${MAIL_DIR:-$HOME/.local/share/mail/gmail}"
+MAIL_DIR="${MAIL_DIR:-$HOME/.local/share/mail/amazon}"
 STATE_FILE="/tmp/mail-notify-seen"
 
 touch "$STATE_FILE"
@@ -12,6 +12,8 @@ for dir in "$MAIL_DIR"/*/new; do
   [ -d "$dir" ] || continue
   folder=$(basename "$(dirname "$dir")")
   [ "$folder" = "Archive" ] && continue
+  [ "$folder" = "Food Menu" ] && continue
+  [ "$folder" = "News" ] && continue
   count=$(find "$dir" -type f 2>/dev/null | wc -l)
   [ "$count" -eq 0 ] && continue
   total=$((total + count))
@@ -23,6 +25,8 @@ for dir in "$MAIL_DIR"/*/new; do
   [ -d "$dir" ] || continue
   folder=$(basename "$(dirname "$dir")")
   [ "$folder" = "Archive" ] && continue
+  [ "$folder" = "Food Menu" ] && continue
+  [ "$folder" = "News" ] && continue
   new_count=0
   for f in "$dir"/*; do
     [ -f "$f" ] || continue
@@ -36,21 +40,24 @@ done
 # Trim state file to last 5000 entries
 tail -5000 "$STATE_FILE" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
 
-# Last sync time
+# Last sync time and status
 sync_ago=""
+sync_ok=false
 if [ -f /tmp/mailsync-last ]; then
   elapsed=$(( $(date +%s) - $(cat /tmp/mailsync-last) ))
   if [ "$elapsed" -lt 60 ]; then sync_ago="synced ${elapsed}s ago"
   elif [ "$elapsed" -lt 3600 ]; then sync_ago="synced $((elapsed/60))m ago"
   else sync_ago="synced $((elapsed/3600))h ago"
   fi
+  [ "$elapsed" -lt 300 ] && sync_ok=true
 fi
 
 # Waybar JSON output
+if $sync_ok; then class="sync-ok"; else class="sync-fail"; fi
 if [ "$total" -gt 0 ]; then
   tooltip=$(echo -e "$tooltip" | sed 's/"/\\"/g' | tr '\n' ' ')
   [ -n "$sync_ago" ] && tooltip="$tooltip| $sync_ago"
-  echo "{\"text\": \"📬 $total\", \"tooltip\": \"$tooltip\", \"class\": \"has-mail\"}"
+  echo "{\"text\": \"📬 $total\", \"tooltip\": \"$tooltip\", \"class\": \"$class\"}"
 else
-  echo "{\"text\": \"📬 0\", \"tooltip\": \"${sync_ago:-No new mail}\", \"class\": \"no-mail\"}"
+  echo "{\"text\": \"📬 0\", \"tooltip\": \"${sync_ago:-No new mail}\", \"class\": \"$class\"}"
 fi
