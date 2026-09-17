@@ -16,7 +16,7 @@ def run_khal_with_pty():
     try:
         import struct, fcntl, termios
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 200, 0, 0))
-        p = subprocess.Popen(["khal", "calendar"], stdout=slave, stderr=subprocess.DEVNULL, close_fds=True)
+        p = subprocess.Popen(["khal", "calendar", "-f", "{start-end-time-style} {title}{repeat-symbol}{alarm-symbol}"], stdout=slave, stderr=subprocess.DEVNULL, close_fds=True)
         os.close(slave)
         output = b""
         while True:
